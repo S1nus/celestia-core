@@ -367,6 +367,88 @@ type Header struct {
 	ProposerAddress Address           `json:"proposer_address"` // original proposer of the block
 }
 
+func (h *Header) Strip() (*StrippedHeader, error) {
+	if h == nil || len(h.ValidatorsHash) == 0 {
+		return nil, fmt.Errorf("cannot strip nil Header or missing ValidatorsHash")
+	}
+	hbz, err := h.Version.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	pbt, err := gogotypes.StdTimeMarshal(h.Time)
+	if err != nil {
+		return nil, err
+	}
+
+	pbbi := h.LastBlockID.ToProto()
+	bzbi, err := pbbi.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	root, proofs := merkle.ProofsFromByteSlices([][]byte{
+		hbz,
+		cdcEncode(h.ChainID),
+		cdcEncode(h.Height),
+		pbt,
+		bzbi,
+		cdcEncode(h.LastCommitHash),
+		cdcEncode(h.DataHash),
+		cdcEncode(h.ValidatorsHash),
+		cdcEncode(h.NextValidatorsHash),
+		cdcEncode(h.ConsensusHash),
+		cdcEncode(h.AppHash),
+		cdcEncode(h.LastResultsHash),
+		cdcEncode(h.EvidenceHash),
+		cdcEncode(h.ProposerAddress),
+	})
+	if !bytes.Equal(root, h.Hash()) {
+		return nil, fmt.Errorf("roots don't match")
+	}
+	return &StrippedHeader{
+		Hash:             h.Hash(),
+		LastBlockID:      h.LastBlockID,
+		LastBlockIDProof: proofs[4],
+		DataHash:         h.DataHash,
+		DataHashProof:    proofs[6],
+		AppHash:          h.AppHash,
+		AppHashProof:     proofs[10],
+	}, nil
+}
+
+type StrippedHeader struct {
+	Hash             cmtbytes.HexBytes
+	LastBlockID      BlockID
+	LastBlockIDProof *merkle.Proof
+	DataHash         cmtbytes.HexBytes
+	DataHashProof    *merkle.Proof
+	AppHash          cmtbytes.HexBytes
+	AppHashProof     *merkle.Proof
+}
+
+func (sh *StrippedHeader) VerifyBackwards(prev *StrippedHeader) error {
+
+	pbbi := sh.LastBlockID.ToProto()
+	bzbi, err := pbbi.Marshal()
+	if err != nil {
+		return err
+	}
+
+	if !bytes.Equal(prev.Hash, sh.LastBlockID.Hash) {
+		return fmt.Errorf("last block ID hash doesn't match")
+	}
+	if sh.AppHashProof.Verify(sh.Hash, sh.AppHash) != nil {
+		return fmt.Errorf("invalid Apphash merkle proof")
+	}
+	if sh.DataHashProof.Verify(sh.Hash, sh.DataHash) != nil {
+		return fmt.Errorf("invalid Apphash merkle proof")
+	}
+	if sh.LastBlockIDProof.Verify(sh.Hash, bzbi) != nil {
+		return fmt.Errorf("invalid LastBlockID merkle proof")
+	}
+	return nil
+}
+
 // Populate the Header with state-derived data.
 // Call this after MakeBlock to complete the Header.
 func (h *Header) Populate(
